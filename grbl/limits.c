@@ -109,11 +109,11 @@ uint8_t limits_get_state()
           // Check limit pin state. 
           if (limits_get_state()) {
             mc_reset(); // Initiate system kill.
-            bit_true_atomic(sys_rt_exec_alarm, (EXEC_ALARM_HARD_LIMIT|EXEC_CRITICAL_EVENT)); // Indicate hard limit critical event
+            system_set_exec_alarm_flag((EXEC_ALARM_HARD_LIMIT|EXEC_CRITICAL_EVENT)); // Indicate hard limit critical event
           }
         #else
           mc_reset(); // Initiate system kill.
-          bit_true_atomic(sys_rt_exec_alarm, (EXEC_ALARM_HARD_LIMIT|EXEC_CRITICAL_EVENT)); // Indicate hard limit critical event
+          system_set_exec_alarm_flag((EXEC_ALARM_HARD_LIMIT|EXEC_CRITICAL_EVENT)); // Indicate hard limit critical event
         #endif
       }
     }
@@ -129,7 +129,7 @@ uint8_t limits_get_state()
         // Check limit pin state. 
         if (limits_get_state()) {
           mc_reset(); // Initiate system kill.
-          bit_true_atomic(sys_rt_exec_alarm, (EXEC_ALARM_HARD_LIMIT|EXEC_CRITICAL_EVENT)); // Indicate hard limit critical event
+          system_set_exec_alarm_flag((EXEC_ALARM_HARD_LIMIT|EXEC_CRITICAL_EVENT)); // Indicate hard limit critical event
         }
       }  
     }
@@ -184,20 +184,7 @@ void limits_go_home(uint8_t cycle_mask)
       // Set target location for active axes and setup computation for homing rate.
       if (bit_istrue(cycle_mask,bit(idx))) {
         n_active_axis++;
-        #ifdef COREXY
-          if (idx == X_AXIS) {
-            int32_t axis_position = system_convert_corexy_to_y_axis_steps(sys.position);
-            sys.position[A_MOTOR] = axis_position;
-            sys.position[B_MOTOR] = -axis_position;
-          } else if (idx == Y_AXIS) {
-            int32_t axis_position = system_convert_corexy_to_x_axis_steps(sys.position);
-            sys.position[A_MOTOR] = sys.position[B_MOTOR] = axis_position;
-          } else { 
-            sys.position[Z_AXIS] = 0; 
-          }
-        #else
-          sys.position[idx] = 0;
-        #endif
+        sys.position[idx] = 0;
         // Set target direction based on cycle mask and homing cycle approach state.
         // NOTE: This happens to compile smaller than any other implementation tried.
         if (bit_istrue(settings.homing_dir_mask,bit(idx))) {
@@ -219,9 +206,9 @@ void limits_go_home(uint8_t cycle_mask)
     
     // Perform homing cycle. Planner buffer should be empty, as required to initiate the homing cycle.
     #ifdef USE_LINE_NUMBERS
-      plan_buffer_line(target, homing_rate, false, HOMING_CYCLE_LINE_NUMBER); // Bypass mc_line(). Directly plan homing motion.
+      plan_buffer_line(target, homing_rate, false, false, HOMING_CYCLE_LINE_NUMBER); // Bypass mc_line(). Directly plan homing motion.
     #else
-      plan_buffer_line(target, homing_rate, false); // Bypass mc_line(). Directly plan homing motion.
+      plan_buffer_line(target, homing_rate, false, false); // Bypass mc_line(). Directly plan homing motion.
     #endif
     
     st_prep_buffer(); // Prep and fill segment buffer from newly planned block.
@@ -232,14 +219,7 @@ void limits_go_home(uint8_t cycle_mask)
         limit_state = limits_get_state();
         for (idx=0; idx<N_AXIS; idx++) {
           if (axislock & step_pin[idx]) {
-            if (limit_state & (1 << idx)) { 
-              #ifdef COREXY
-                if (idx==Z_AXIS) { axislock &= ~(step_pin[Z_AXIS]); }
-                else { axislock &= ~(step_pin[A_MOTOR]|step_pin[B_MOTOR]); }
-              #else
-                axislock &= ~(step_pin[idx]); 
-              #endif
-            }
+            if (limit_state & (1 << idx)) { axislock &= ~(step_pin[idx]); }
           }
         }
         sys.homing_axis_lock = axislock;
@@ -258,7 +238,7 @@ void limits_go_home(uint8_t cycle_mask)
           return;
         } else {
           // Pull-off motion complete. Disable CYCLE_STOP from executing.
-          bit_false_atomic(sys_rt_exec_state,EXEC_CYCLE_STOP);
+          system_clear_exec_state_flag(EXEC_CYCLE_STOP);
           break;
         } 
       }
@@ -290,6 +270,9 @@ void limits_go_home(uint8_t cycle_mask)
   // set up pull-off maneuver from axes limit switches that have been homed. This provides
   // some initial clearance off the switches and should also help prevent them from falsely
   // triggering when hard limits are enabled or when more than one axes shares a limit pin.
+  #ifdef COREXY
+    int32_t off_axis_position = 0;
+  #endif
   int32_t set_axis_position;
   // Set machine positions for homed limit switches. Don't update non-homed axes.
   for (idx=0; idx<N_AXIS; idx++) {
@@ -305,15 +288,15 @@ void limits_go_home(uint8_t cycle_mask)
         }
       #endif
       
-      #ifdef COREXY    
+      #ifdef COREXY
         if (idx==X_AXIS) { 
-          int32_t off_axis_position = system_convert_corexy_to_y_axis_steps(sys.position);
-          sys.position[A_MOTOR] = set_axis_position + off_axis_position;
-          sys.position[B_MOTOR] = set_axis_position - off_axis_position;          
+          off_axis_position = (sys.position[B_MOTOR] - sys.position[A_MOTOR])/2;
+          sys.position[A_MOTOR] = set_axis_position - off_axis_position;
+          sys.position[B_MOTOR] = set_axis_position + off_axis_position;          
         } else if (idx==Y_AXIS) {
-          int32_t off_axis_position = system_convert_corexy_to_x_axis_steps(sys.position);
-          sys.position[A_MOTOR] = off_axis_position + set_axis_position;
-          sys.position[B_MOTOR] = off_axis_position - set_axis_position;
+          off_axis_position = (sys.position[A_MOTOR] + sys.position[B_MOTOR])/2;
+          sys.position[A_MOTOR] = off_axis_position - set_axis_position;
+          sys.position[B_MOTOR] = off_axis_position + set_axis_position;
         } else {
           sys.position[idx] = set_axis_position;
         }        
@@ -354,7 +337,7 @@ void limits_soft_check(float *target)
       // workspace volume so just come to a controlled stop so position is not lost. When complete
       // enter alarm mode.
       if (sys.state == STATE_CYCLE) {
-        bit_true_atomic(sys_rt_exec_state, EXEC_FEED_HOLD);
+        system_set_exec_state_flag(EXEC_FEED_HOLD);
         do {
           protocol_execute_realtime();
           if (sys.abort) { return; }
@@ -362,7 +345,7 @@ void limits_soft_check(float *target)
       }
     
       mc_reset(); // Issue system reset and ensure spindle and coolant are shutdown.
-      bit_true_atomic(sys_rt_exec_alarm, (EXEC_ALARM_SOFT_LIMIT|EXEC_CRITICAL_EVENT)); // Indicate soft limit critical event
+      system_set_exec_alarm_flag((EXEC_ALARM_SOFT_LIMIT|EXEC_CRITICAL_EVENT)); // Indicate soft limit critical event
       protocol_execute_realtime(); // Execute to enter critical event loop and system abort
       return;
     }

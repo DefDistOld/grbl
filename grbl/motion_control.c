@@ -67,10 +67,11 @@
   } while (1);
 
   // Plan and queue motion into planner buffer
+  // uint8_t plan_status; // Not used in normal operation.
   #ifdef USE_LINE_NUMBERS
-    plan_buffer_line(target, feed_rate, invert_feed_rate, line_number);
+    plan_buffer_line(target, feed_rate, invert_feed_rate, false, line_number);
   #else
-    plan_buffer_line(target, feed_rate, invert_feed_rate);
+    plan_buffer_line(target, feed_rate, invert_feed_rate, false);
   #endif
 }
 
@@ -202,17 +203,9 @@
 // Execute dwell in seconds.
 void mc_dwell(float seconds) 
 {
-   if (sys.state == STATE_CHECK_MODE) { return; }
-   
-   uint16_t i = floor(1000/DWELL_TIME_STEP*seconds);
-   protocol_buffer_synchronize();
-   delay_ms(floor(1000*seconds-i*DWELL_TIME_STEP)); // Delay millisecond remainder.
-   while (i-- > 0) {
-     // NOTE: Check and execute realtime commands during dwell every <= DWELL_TIME_STEP milliseconds.
-     protocol_execute_realtime();
-     if (sys.abort) { return; }
-     _delay_ms(DWELL_TIME_STEP); // Delay DWELL_TIME_STEP increment
-   }
+  if (sys.state == STATE_CHECK_MODE) { return; }
+  protocol_buffer_synchronize();
+  delay_sec(seconds, DELAY_MODE_DWELL);
 }
 
 
@@ -227,7 +220,7 @@ void mc_homing_cycle()
   #ifdef LIMITS_TWO_SWITCHES_ON_AXES  
     if (limits_get_state()) { 
       mc_reset(); // Issue system reset and ensure spindle and coolant are shutdown.
-      bit_true_atomic(sys_rt_exec_alarm, (EXEC_ALARM_HARD_LIMIT|EXEC_CRITICAL_EVENT));
+      system_set_exec_alarm_flag((EXEC_ALARM_HARD_LIMIT|EXEC_CRITICAL_EVENT));
       return;
     }
   #endif
@@ -277,16 +270,21 @@ void mc_homing_cycle()
   protocol_buffer_synchronize();
 
   // Initialize probing control variables
-  sys.probe_succeeded = false; // Re-initialize probe history before beginning cycle.  
+  sys.probe_succeeded = false; // Re-initialize probe history before beginning cycle. 
+  
   probe_configure_invert_mask(is_probe_away);
   
   // After syncing, check if probe is already triggered. If so, halt and issue alarm.
   // NOTE: This probe initialization error applies to all probing cycles.
   if ( probe_get_state() ) { // Check probe pin state.
-    bit_true_atomic(sys_rt_exec_alarm, EXEC_ALARM_PROBE_FAIL);
+    system_set_exec_alarm_flag(EXEC_ALARM_PROBE_FAIL);
     protocol_execute_realtime();
   }
   if (sys.abort) { return; } // Return if system reset has been issued.
+
+  //Enable probe interrupt pin mask
+  CONTROL_PCMSK = (CONTROL_MASK | PROBE_MASK);  //JTS added.  Later on: 'ISR(CONTROL_INT_vect)' disables probe interrupts
+  sys.probe_interrupt_occurred = 0;	//JTS added.  Initialize whether the probe occurred.
 
   // Setup and queue probing motion. Auto cycle-start should not start the cycle.
   #ifdef USE_LINE_NUMBERS
@@ -299,7 +297,7 @@ void mc_homing_cycle()
   sys_probe_state = PROBE_ACTIVE;
 
   // Perform probing cycle. Wait here until probe is triggered or motion completes.
-  bit_true_atomic(sys_rt_exec_state, EXEC_CYCLE_START);
+  system_set_exec_state_flag(EXEC_CYCLE_START);
   do {
     protocol_execute_realtime(); 
     if (sys.abort) { return; } // Check for system abort
@@ -309,8 +307,8 @@ void mc_homing_cycle()
   
   // Set state variables and error out, if the probe failed and cycle with error is enabled.
   if (sys_probe_state == PROBE_ACTIVE) {
-    if (is_no_error) { memcpy(sys.probe_position, sys.position, sizeof(float)*N_AXIS); }
-    else { bit_true_atomic(sys_rt_exec_alarm, EXEC_ALARM_PROBE_FAIL); }
+    if (is_no_error) { memcpy(sys.probe_position, sys.position, sizeof(sys.position)); }
+    else { system_set_exec_alarm_flag(EXEC_ALARM_PROBE_FAIL); }
   } else { 
     sys.probe_succeeded = true; // Indicate to system the probing cycle completed successfully.
   }
@@ -334,6 +332,36 @@ void mc_homing_cycle()
 }
 
 
+// Plans and executes the single special motion case for parking. Independent of main planner buffer.
+// NOTE: Uses the always free planner ring buffer head to store motion parameters for execution.
+void mc_parking_motion(float *parking_target, float feed_rate) 
+{
+  if (sys.abort) { return; } // Block during abort.
+  
+  #ifdef USE_LINE_NUMBERS
+    uint8_t plan_status = plan_buffer_line(parking_target, feed_rate, false, true, PARKING_MOTION_LINE_NUMBER);
+  #else
+    uint8_t plan_status = plan_buffer_line(parking_target, feed_rate, false, true);
+  #endif
+  if (plan_status) {
+		bit_true(sys.step_control, STEP_CONTROL_EXECUTE_PARK); 
+		bit_false(sys.step_control, STEP_CONTROL_END_MOTION); // Allow parking motion to execute, if feed hold is active.
+    st_parking_setup_buffer(); // Setup step segment buffer for special parking motion case
+		st_prep_buffer();
+		st_wake_up();     
+		do {
+			protocol_exec_rt_system();
+			if (sys.abort) { return; }
+		} while (sys.step_control & STEP_CONTROL_EXECUTE_PARK);  
+		st_parking_restore_buffer(); // Restore step segment buffer to normal run state.
+	} else {
+    bit_false(sys.step_control, STEP_CONTROL_EXECUTE_PARK);
+		protocol_exec_rt_system();
+  }
+
+}
+
+
 // Method to ready the system to reset by setting the realtime reset command and killing any
 // active processes in the system. This also checks if a system reset is issued while Grbl
 // is in a motion state. If so, kills the steppers and sets the system alarm to flag position
@@ -343,7 +371,7 @@ void mc_reset()
 {
   // Only this function can set the system reset. Helps prevent multiple kill calls.
   if (bit_isfalse(sys_rt_exec_state, EXEC_RESET)) {
-    bit_true_atomic(sys_rt_exec_state, EXEC_RESET);
+    system_set_exec_state_flag(EXEC_RESET);
 
     // Kill spindle and coolant.   
     spindle_stop();
@@ -353,9 +381,10 @@ void mc_reset()
     // NOTE: If steppers are kept enabled via the step idle delay setting, this also keeps
     // the steppers enabled by avoiding the go_idle call altogether, unless the motion state is
     // violated, by which, all bets are off.
-    if ((sys.state & (STATE_CYCLE | STATE_HOMING)) || (sys.suspend == SUSPEND_ENABLE_HOLD)) {
-      if (sys.state == STATE_HOMING) { bit_true_atomic(sys_rt_exec_alarm, EXEC_ALARM_HOMING_FAIL); }
-      else { bit_true_atomic(sys_rt_exec_alarm, EXEC_ALARM_ABORT_CYCLE); }
+    if ((sys.state & (STATE_CYCLE | STATE_HOMING)) || 
+    		(sys.step_control & (STEP_CONTROL_EXECUTE_HOLD | STEP_CONTROL_EXECUTE_PARK))) {
+      if (sys.state == STATE_HOMING) { system_set_exec_alarm_flag(EXEC_ALARM_HOMING_FAIL); }
+      else { system_set_exec_alarm_flag(EXEC_ALARM_ABORT_CYCLE); }
       st_go_idle(); // Force kill steppers. Position has likely been lost.
     }
   }

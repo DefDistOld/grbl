@@ -30,15 +30,15 @@
 #include "grbl.h" // For Arduino IDE compatibility.
 
 
-// Default settings. Used when resetting EEPROM. Change to desired name in defaults.h
+// Define CPU pin map and default settings.
+// NOTE: OEMs can avoid the need to maintain/update the defaults.h and cpu_map.h files and use only
+// one configuration file by placing their specific defaults and pin map at the bottom of this file.
+// If doing so, simply comment out these two defines and see instructions below.
 #define DEFAULTS_GENERIC
+#define CPU_MAP_ATMEGA328P // Arduino Uno CPU
 
 // Serial baud rate
 #define BAUD_RATE 115200
-
-// Default cpu mappings. Grbl officially supports the Arduino Uno only. Other processor types
-// may exist from user-supplied templates or directly user-defined in cpu_map.h
-#define CPU_MAP_ATMEGA328P // Arduino Uno CPU
 
 // Define realtime command special characters. These characters are 'picked-off' directly from the
 // serial read data stream and are not passed to the grbl line execution parser. Select characters
@@ -79,7 +79,7 @@
 // Number of homing cycles performed after when the machine initially jogs to limit switches.
 // This help in preventing overshoot and should improve repeatability. This value should be one or 
 // greater.
-#define N_HOMING_LOCATE_CYCLE 1 // Integer (1-128)
+#define N_HOMING_LOCATE_CYCLE 2 // Integer (1-128)
 
 // After homing, Grbl will set by default the entire machine space into negative space, as is typical
 // for professional CNC machines, regardless of where the limit switches are located. Uncomment this 
@@ -102,6 +102,7 @@
 #define N_DECIMAL_RATEVALUE_INCH  1 // Rate or velocity value in in/min
 #define N_DECIMAL_RATEVALUE_MM    0 // Rate or velocity value in mm/min
 #define N_DECIMAL_SETTINGVALUE    3 // Decimals for floating point setting values
+#define N_DECIMAL_RPMVALUE        0 // RPM value in rotations per min.
 
 // If your machine has two limits switches wired in parallel to one axis, you will need to enable
 // this feature. Since the two switches are sharing a single pin, there is no way for Grbl to tell
@@ -113,7 +114,7 @@
 
 // Allows GRBL to track and report gcode line numbers.  Enabling this means that the planning buffer
 // goes from 18 or 16 to make room for the additional line number data in the plan_block_t struct
-// #define USE_LINE_NUMBERS // Disabled by default. Uncomment to enable.
+#define USE_LINE_NUMBERS // Disabled by default. Uncomment to enable.
 
 // Allows GRBL to report the real-time feed rate.  Enabling this means that GRBL will be reporting more 
 // data with each status update.
@@ -127,7 +128,7 @@
  
 // Enables a second coolant control pin via the mist coolant g-code command M7 on the Arduino Uno
 // analog pin 4. Only use this option if you require a second coolant control pin.
-// NOTE: The M8 flood coolant control pin on analog pin 3 will still be functional regardless.
+// NOTE: The M8 flood coolant control pin on analog pin 4 will still be functional regardless.
 // #define ENABLE_M7 // Disabled by default. Uncomment to enable.
 
 // This option causes the feed hold input to act as a safety door switch. A safety door, when triggered,
@@ -138,24 +139,24 @@
 
 // After the safety door switch has been toggled and restored, this setting sets the power-up delay
 // between restoring the spindle and coolant and resuming the cycle.
-// NOTE: Delay value is defined in milliseconds from zero to 65,535. 
-#define SAFETY_DOOR_SPINDLE_DELAY 4000
-#define SAFETY_DOOR_COOLANT_DELAY 1000
+#define SAFETY_DOOR_SPINDLE_DELAY 4.0 // Float (seconds)
+#define SAFETY_DOOR_COOLANT_DELAY 1.0 // Float (seconds)
 
 // Enable CoreXY kinematics. Use ONLY with CoreXY machines. 
 // IMPORTANT: If homing is enabled, you must reconfigure the homing cycle #defines above to 
 // #define HOMING_CYCLE_0 (1<<X_AXIS) and #define HOMING_CYCLE_1 (1<<Y_AXIS)
 // NOTE: This configuration option alters the motion of the X and Y axes to principle of operation
 // defined at (http://corexy.com/theory.html). Motors are assumed to positioned and wired exactly as
-// described, if not, motions may move in strange directions. Grbl requires the CoreXY A and B motors
+// described, if not, motions may move in strange directions. Grbl assumes the CoreXY A and B motors
 // have the same steps per mm internally.
 // #define COREXY // Default disabled. Uncomment to enable.
 
-// Inverts pin logic of the control command pins. This essentially means when this option is enabled
-// you can use normally-closed switches, rather than the default normally-open switches.
-// NOTE: If you require individual control pins inverted, keep this macro disabled and simply alter
-//   the CONTROL_INVERT_MASK definition in cpu_map.h files.
-// #define INVERT_ALL_CONTROL_PINS // Default disabled. Uncomment to enable.
+// Inverts pin logic of the control command pins based on a mask. This essentially means you can use
+// normally-closed switches on the specified pins, rather than the default normally-open switches.
+// NOTE: The top option will mask and invert all control pins. The bottom option is an example of
+// inverting only two control pins, the safety door and reset. See cpu_map.h for other bit definitions.
+// #define INVERT_CONTROL_PIN_MASK CONTROL_MASK // Default disabled. Uncomment to disable.
+// #define INVERT_CONTROL_PIN_MASK ((1<<CONTROL_SAFETY_DOOR_BIT)|(CONTROL_RESET_BIT)) // Default disabled.
 
 // Inverts select limit pin states based on the following mask. This effects all limit pin functions, 
 // such as hard limits and homing. However, this is different from overall invert limits setting. 
@@ -172,11 +173,12 @@
 // uncomment the config option USE_SPINDLE_DIR_AS_ENABLE_PIN below.
 // #define INVERT_SPINDLE_ENABLE_PIN // Default disabled. Uncomment to enable.
 
-// Enable control pin states feedback in status reports. The data is presented as simple binary of
-// the control pin port (0 (low) or 1(high)), masked to show only the input pins. Non-control pins on the 
-// port will always show a 0 value. See cpu_map.h for the pin bitmap. As with the limit pin reporting,
-// we do not recommend keeping this option enabled. Try to only use this for setting up a new CNC.
-// #define REPORT_CONTROL_PIN_STATE // Default disabled. Uncomment to enable.
+// Enable all pin states feedback in status reports. Configurable with Grbl settings to print only
+// the desired data, which is presented as simple binary reading of each pin as (0 (low) or 1(high)).
+// The fields are printed in a particular order and settings groups are separated by '|' characters. 
+// NOTE: This option is here for backward compatibility of the old style of pin state reports, i.e. 
+// `Lim:000`. This new `Pin:` report will be the standard going forward.
+#define REPORT_ALL_PIN_STATES // Default enabled. Comment to disable.
 
 // When Grbl powers-cycles or is hard reset with the Arduino reset button, Grbl boots up with no ALARM
 // by default. This is to make it as simple as possible for new users to start using Grbl. When homing
@@ -246,19 +248,13 @@
 // The hardware PWM output on pin D11 is required for variable spindle output voltages.
 #define VARIABLE_SPINDLE // Default enabled. Comment to disable.
 
-// Used by the variable spindle output only. These parameters set the maximum and minimum spindle speed
-// "S" g-code values to correspond to the maximum and minimum pin voltages. There are 256 discrete and 
-// equally divided voltage bins between the maximum and minimum spindle speeds. So for a 5V pin, 1000
-// max rpm, and 250 min rpm, the spindle output voltage would be set for the following "S" commands: 
-// "S1000" @ 5V, "S250" @ 0.02V, and "S625" @ 2.5V (mid-range). The pin outputs 0V when disabled.
-#define SPINDLE_MAX_RPM 1000.0 // Max spindle RPM. This value is equal to 100% duty cycle on the PWM.
-#define SPINDLE_MIN_RPM 0.0    // Min spindle RPM. This value is equal to (1/256) duty cycle on the PWM.
-
 // Used by variable spindle output only. This forces the PWM output to a minimum duty cycle when enabled.
-// When disabled, the PWM pin will still read 0V. Most users will not need this option, but it may be 
-// useful in certain scenarios. This setting does not update the minimum spindle RPM calculations. Any
-// spindle RPM output lower than this value will be set to this value.
-// #define MINIMUM_SPINDLE_PWM 5 // Default disabled. Uncomment to enable. Integer (0-255)
+// The PWM pin will still read 0V when the spindle is disabled. Most users will not need this option, but
+// it may be useful in certain scenarios. This minimum PWM settings coincides with the spindle rpm minimum
+// setting, like rpm max to max PWM. So the variable spindle pin will not output the voltage range between 
+// 0V for disabled and the voltage set by the minimum PWM for minimum rpm.
+// NOTE: Compute duty cycle at the minimum PWM by this equation: (% duty cycle)=(SPINDLE_MINIMUM_PWM/256)*100
+// #define SPINDLE_MINIMUM_PWM 5 // Default disabled. Uncomment to enable. Integer (0-255)
 
 // By default on a 328p(Uno), Grbl combines the variable spindle PWM and the enable into one pin to help 
 // preserve I/O pins. For certain setups, these may need to be separate pins. This configure option uses
@@ -391,6 +387,40 @@
 // NOTE: This option has no effect if SOFTWARE_DEBOUNCE is enabled.
 // #define HARD_LIMIT_FORCE_STATE_CHECK // Default disabled. Uncomment to enable.
 
+// Adjusts homing cycle search and locate scalars. These are the multipliers used by Grbl's
+// homing cycle to ensure the limit switches are engaged and cleared through each phase of 
+// the cycle. The search phase uses the axes max-travel setting times the SEARCH_SCALAR to
+// determine distance to look for the limit switch. Once found, the locate phase begins and
+// uses the homing pull-off distance setting times the LOCATE_SCALAR to pull-off and re-engage
+// the limit switch.
+// NOTE: Both of these values must be greater than 1.0 to ensure proper function.
+// #define HOMING_AXIS_SEARCH_SCALAR  1.5 // Uncomment to override defaults in limits.c.
+// #define HOMING_AXIS_LOCATE_SCALAR  10.0 // Uncomment to override defaults in limits.c.
+
+
+// Enables and configures parking motion methods upon a safety door state. Primarily for OEMs
+// that desire this feature for their integrated machines. At the moment, Grbl assumes that 
+// the parking motion only involves one axis, although the parking implementation was written
+// to be easily refactored for any number of motions on different axes by altering the parking 
+// source code. At this time, Grbl only supports parking one axis (typically the Z-axis) that 
+// moves in the positive direction upon retracting and negative direction upon restoring position.
+// The motion executes with a slow pull-out retraction motion, power-down, and a fast park. 
+// Restoring to the resume position follows these set motions in reverse: fast restore to 
+// pull-out position, power-up with a time-out, and plunge back to the original position at the
+// slower pull-out rate.
+// NOTE: Still a work-in-progress. Machine coordinates must be in all negative space and 
+// does not work with HOMING_FORCE_SET_ORIGIN enabled. Parking motion also moves only in 
+// positive direction.
+// #define PARKING_ENABLE  // Default disabled. Uncomment to enable
+
+// Configure options for the parking motion, if enabled.
+#define PARKING_AXIS Z_AXIS // Define which axis that performs the parking motion
+#define PARKING_TARGET -5.0 // Parking axis target. In mm, as machine coordinate [-max_travel,0].
+#define PARKING_RATE -1.0 // Parking fast rate after pull-out. In mm/min or (-1.0) for seek rate.
+#define PARKING_PULLOUT_RATE 250.0 // Pull-out/plunge slow feed rate in mm/min.
+#define PARKING_PULLOUT_INCREMENT 5.0 // Spindle pull-out and plunge distance in mm. Incremental distance.
+                                      // Must be positive value or equal to zero.
+
 
 // ---------------------------------------------------------------------------------------
 // COMPILE-TIME ERROR CHECKING OF DEFINE VALUES:
@@ -407,7 +437,24 @@
   #error "USE_SPINDLE_DIR_AS_ENABLE_PIN may only be used with a 328p processor"
 #endif
 
-// ---------------------------------------------------------------------------------------
+#if defined(PARKING_ENABLE)
+  #if defined(HOMING_FORCE_SET_ORIGIN)
+    #error "HOMING_FORCE_SET_ORIGIN is not supported with PARKING_ENABLE at this time."
+  #endif
+#endif
+
+/* ---------------------------------------------------------------------------------------
+   OEM Single File Configuration Option
+   
+   Instructions: Paste the cpu_map and default setting definitions below without an enclosing
+   #ifdef. Comment out the CPU_MAP_xxx and DEFAULT_xxx defines at the top of this file, and
+   the compiler will ignore the contents of defaults.h and cpu_map.h and use the definitions
+   below.
+*/
+
+// Paste CPU_MAP definitions here.
+
+// Paste default settings definitions here.
 
 
 #endif
